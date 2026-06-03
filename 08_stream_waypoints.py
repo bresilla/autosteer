@@ -10,7 +10,9 @@ What this step proves:
   * pacing: pause 10 ms after each frame (100 points ≈ 1 second)
   * the "engage after ≥100 points streamed" rule lives here
 
-The route is a built-in straight test line (routes.straight_line) — no planner.
+The route is the line.geojson test line. It is short, so we resample it finely
+enough to yield at least 100 points (kept inside the AgJunction 0.3-4.5 m band),
+so the first window is a full 100-point batch.
 
 Run:
     ./08_stream_waypoints.py
@@ -18,6 +20,7 @@ Run:
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 import time
@@ -29,6 +32,23 @@ import routes
 
 # Datum is taken from the loaded route's first vertex in main(); placeholder here.
 DATUM_LAT, DATUM_LON = 0.0, 0.0
+
+MIN_POINTS = a.FUTURE_POINT_COUNT   # we want a full window (100) on the first batch
+MIN_SPACING_M = 0.3                 # AgJunction minimum point spacing (PROTOCOL.md §8.5)
+
+
+def load_line_with_min_points(min_points: int):
+    """Load line.geojson, resampled fine enough to reach `min_points` (clamped to
+    the AgJunction spacing band). Returns (route, datum_lat, datum_lon, spacing_m)."""
+    path = routes.geojson_path("line")
+    route, dlat, dlon = routes.geojson_route(path)
+    length = sum(math.hypot(route[i + 1].x - route[i].x, route[i + 1].y - route[i].y)
+                 for i in range(len(route) - 1))
+    spacing = routes.WAYPOINT_SPACING_M
+    if len(route) < min_points and length > 0:
+        spacing = max(MIN_SPACING_M, length / min_points)
+        route, dlat, dlon = routes.geojson_route(path, spacing_m=spacing)
+    return route, dlat, dlon, spacing
 
 
 def build_waypoints(route, anchor_lat, anchor_lon):
@@ -56,7 +76,11 @@ def stream_window(bus, status, waypoints, current_index):
 
 def main() -> None:
     global DATUM_LAT, DATUM_LON
-    route, DATUM_LAT, DATUM_LON = routes.geojson_route(routes.geojson_path("line"))
+    route, DATUM_LAT, DATUM_LON, spacing = load_line_with_min_points(MIN_POINTS)
+    print(f"line route: {len(route)} points at {spacing:.2f} m spacing", file=sys.stderr)
+    if len(route) < MIN_POINTS:
+        print(f"warning: line is too short to reach {MIN_POINTS} points even at the "
+              f"{MIN_SPACING_M} m minimum spacing — streaming {len(route)}.", file=sys.stderr)
     bus = a.make_bus()
     status = a.MachineStatus()
 
@@ -82,7 +106,12 @@ def main() -> None:
     print(f"streamed first window: indices [{start}..{end - 1}], {sent} frames "
           f"(~{sent * a.SEND_INTERVAL_S:.1f}s of bus time)")
     print("first 3 points already passed are re-sent as overlap on the next window.")
-    print(f"\n{sent} ≥ 100 points streamed → RunCommand is now allowed (step 09).")
+    if sent >= a.FUTURE_POINT_COUNT:
+        print(f"\n{sent} ≥ {a.FUTURE_POINT_COUNT} points streamed → RunCommand is now "
+              f"allowed (step 09).")
+    else:
+        print(f"\n{sent} < {a.FUTURE_POINT_COUNT} points streamed → RunCommand NOT yet "
+              f"allowed (line too short).")
 
 
 if __name__ == "__main__":

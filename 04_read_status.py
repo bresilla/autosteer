@@ -51,8 +51,16 @@ LISTEN_SECONDS = 6.0
 PRINT_PERIOD = 0.5
 
 
+STATE = {0b00: "00 off", 0b01: "01 ON", 0b10: "10 err", 0b11: "11 n/a"}
+
+
 def yn(value: bool) -> str:
     return "Y" if value else "-"
+
+
+def pair(byte: int, hi_bit: int) -> int:
+    """The 2-bit field whose high bit is `hi_bit` (1-based), e.g. hi_bit=6 -> bits 6-5."""
+    return (byte >> (hi_bit - 2)) & 0b11
 
 
 def show(status: a.MachineStatus, t: float) -> None:
@@ -67,12 +75,23 @@ def show(status: a.MachineStatus, t: float) -> None:
     )
 
 
+def show_raw(data: bytes) -> None:
+    """Dump the raw DSSTAT bytes and every 2-bit field, so a wrong Y is obvious."""
+    b1, b2 = data[0], data[1]
+    print("          raw " + " ".join(f"{x:02X}" for x in data)
+          + f"   (byte1={b1:08b} byte2={b2:08b})")
+    print(f"          byte1: PPP[8-7]={STATE[pair(b1,8)]}  engaged[6-5]={STATE[pair(b1,6)]}"
+          f"  header[4-3]={STATE[pair(b1,4)]}  dir[2-1]={STATE[pair(b1,2)]}")
+    print(f"          byte2: allowed[2-1]={STATE[pair(b2,2)]}  reject[8-3]={(b2 >> 2) & 0x3F}")
+
+
 def main() -> None:
     bus = a.make_bus()
     status = a.MachineStatus()
 
     t0 = time.monotonic()
     last_print = -PRINT_PERIOD
+    last_dsstat: bytes | None = None
 
     while True:
         now = time.monotonic() - t0
@@ -84,10 +103,14 @@ def main() -> None:
 
         if frame is not None:
             a.process_frame(frame, status)
+            if a.pgn_from_id(frame.arbitration_id) == a.PGN_DSSTAT and len(frame.data) >= 8:
+                last_dsstat = frame.data
 
         if now - last_print >= PRINT_PERIOD:
             last_print = now
             show(status, now)
+            if last_dsstat is not None:
+                show_raw(last_dsstat)
 
     print()
     print("Gate check before setting SystemActive:")
